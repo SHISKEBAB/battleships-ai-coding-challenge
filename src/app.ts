@@ -22,6 +22,7 @@ import {
 import { createGameRoutes } from './routes/games';
 import { GameManager } from './services/GameManager';
 import { AuthService } from './services/AuthService';
+import { ConnectionManager } from './services/ConnectionManager';
 
 dotenv.config();
 
@@ -31,7 +32,8 @@ setupGlobalErrorHandlers();
 const app = express();
 
 // Initialize services
-const gameManager = new GameManager();
+const connectionManager = new ConnectionManager();
+const gameManager = new GameManager(connectionManager);
 const authService = new AuthService();
 
 // CORS configuration
@@ -71,7 +73,8 @@ app.get('/health', asyncErrorHandler(async (req: express.Request, res: express.R
     correlationId,
     services: {
       gameManager: gameManager ? 'available' : 'unavailable',
-      authService: authService ? 'available' : 'unavailable'
+      authService: authService ? 'available' : 'unavailable',
+      connectionManager: connectionManager ? 'available' : 'unavailable'
     },
     memory: {
       used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024 * 100) / 100,
@@ -83,7 +86,7 @@ app.get('/health', asyncErrorHandler(async (req: express.Request, res: express.R
 }));
 
 // API routes
-app.use('/api/games', createGameRoutes(gameManager, authService));
+app.use('/api/games', createGameRoutes(gameManager, authService, connectionManager));
 
 // Handle 404 for unmatched routes
 app.use('*', notFoundHandler);
@@ -94,6 +97,7 @@ app.use(errorHandler);
 // Graceful shutdown handling
 process.on('SIGTERM', () => {
   console.log('SIGTERM received, shutting down gracefully');
+  connectionManager.destroy();
   gameManager.destroy();
   authService.destroy();
   process.exit(0);
@@ -101,6 +105,7 @@ process.on('SIGTERM', () => {
 
 process.on('SIGINT', () => {
   console.log('SIGINT received, shutting down gracefully');
+  connectionManager.destroy();
   gameManager.destroy();
   authService.destroy();
   process.exit(0);

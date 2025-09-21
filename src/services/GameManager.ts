@@ -3,21 +3,43 @@ import { createGame, addPlayerToGame, createPlayer, areAllPlayersReady, getOppon
 import { validateShipPlacements, createShipsFromPlacements } from '../utils/shipValidation';
 import { parsePosition } from '../utils/coordinates';
 import { randomUUID } from 'crypto';
+import {
+  GameEvent,
+  PlayerJoinedEvent,
+  ShipsPlacedEvent,
+  GameStartedEvent,
+  AttackMadeEvent,
+  GameFinishedEvent
+} from '../types/events';
+import { ConnectionManager } from './ConnectionManager';
 
 export class GameManager {
   private games = new Map<string, Game>();
   private cleanupInterval: NodeJS.Timeout;
+  private connectionManager?: ConnectionManager;
 
-  constructor() {
+  constructor(connectionManager?: ConnectionManager) {
+    this.connectionManager = connectionManager;
     this.cleanupInterval = setInterval(() => {
       this.cleanupInactiveGames();
     }, 300000);
+  }
+
+  /**
+   * Set the connection manager for broadcasting events
+   */
+  setConnectionManager(connectionManager: ConnectionManager): void {
+    this.connectionManager = connectionManager;
   }
 
   createGame(hostPlayerName: string): Game {
     const hostPlayer = createPlayer(randomUUID(), hostPlayerName);
     const game = createGame(hostPlayer);
     this.games.set(game.gameId, game);
+
+    // Broadcast player joined event
+    this.broadcastPlayerJoined(game, hostPlayer);
+
     return game;
   }
 
@@ -30,6 +52,10 @@ export class GameManager {
     const player = createPlayer(randomUUID(), playerName);
     const updatedGame = addPlayerToGame(game, player);
     this.games.set(gameId, updatedGame);
+
+    // Broadcast player joined event
+    this.broadcastPlayerJoined(updatedGame, player);
+
     return updatedGame;
   }
 
@@ -65,10 +91,18 @@ export class GameManager {
       game.phase = 'setup';
     }
 
-    if (areAllPlayersReady(game)) {
+    const wasAllPlayersReady = areAllPlayersReady(game);
+
+    // Broadcast ships placed event
+    this.broadcastShipsPlaced(game, player, wasAllPlayersReady);
+
+    if (wasAllPlayersReady) {
       game.phase = 'playing';
       const playerIds = Object.keys(game.players);
       game.currentTurn = playerIds[Math.floor(Math.random() * playerIds.length)]!;
+
+      // Broadcast game started event
+      this.broadcastGameStarted(game);
     }
 
     game.lastActivity = new Date();
@@ -135,9 +169,15 @@ export class GameManager {
     if (allShipsSunk) {
       game.phase = 'finished';
       game.winner = attackerId;
+
+      // Broadcast game finished event
+      this.broadcastGameFinished(game, attackerId, targetId);
     } else {
       game.currentTurn = targetId;
     }
+
+    // Broadcast attack made event
+    this.broadcastAttackMade(game, attackerId, targetId, position, result, hitShip);
 
     game.lastActivity = new Date();
     this.games.set(gameId, game);
@@ -185,6 +225,130 @@ export class GameManager {
 
   getActiveGameCount(): number {
     return this.games.size;
+  }
+
+  /**
+   * Broadcast player joined event
+   */
+  private broadcastPlayerJoined(game: Game, player: Player): void {
+    if (!this.connectionManager) return;
+
+    const event: PlayerJoinedEvent = {
+      type: 'player_joined',
+      gameId: game.gameId,
+      timestamp: new Date().toISOString(),
+      data: {
+        playerId: player.id,
+        playerName: player.name,
+        playerCount: Object.keys(game.players).length
+      }
+    };
+
+    this.connectionManager.broadcast(game.gameId, event, player.id);
+  }
+
+  /**
+   * Broadcast ships placed event
+   */
+  private broadcastShipsPlaced(game: Game, player: Player, allPlayersReady: boolean): void {
+    if (!this.connectionManager) return;
+
+    const event: ShipsPlacedEvent = {
+      type: 'ships_placed',
+      gameId: game.gameId,
+      timestamp: new Date().toISOString(),
+      data: {
+        playerId: player.id,
+        playerName: player.name,
+        isReady: player.ready,
+        allPlayersReady
+      }
+    };
+
+    this.connectionManager.broadcast(game.gameId, event, player.id);
+  }
+
+  /**
+   * Broadcast game started event
+   */
+  private broadcastGameStarted(game: Game): void {
+    if (!this.connectionManager) return;
+
+    const currentPlayer = game.players[game.currentTurn!];
+    const event: GameStartedEvent = {
+      type: 'game_started',
+      gameId: game.gameId,
+      timestamp: new Date().toISOString(),
+      data: {
+        currentTurn: game.currentTurn!,
+        currentPlayerName: currentPlayer?.name || 'Unknown',
+        phase: 'playing' as const
+      }
+    };
+
+    this.connectionManager.broadcast(game.gameId, event);
+  }
+
+  /**
+   * Broadcast attack made event
+   */
+  private broadcastAttackMade(
+    game: Game,
+    attackerId: string,
+    targetId: string,
+    position: string,
+    result: 'hit' | 'miss' | 'sunk',
+    sunkShip?: Ship
+  ): void {
+    if (!this.connectionManager) return;
+
+    const attacker = game.players[attackerId];
+    const target = game.players[targetId];
+    const nextPlayer = game.players[game.currentTurn!];
+
+    const event: AttackMadeEvent = {
+      type: 'attack_made',
+      gameId: game.gameId,
+      timestamp: new Date().toISOString(),
+      data: {
+        attackerId,
+        attackerName: attacker?.name || 'Unknown',
+        targetId,
+        targetName: target?.name || 'Unknown',
+        position,
+        result,
+        sunkShip,
+        nextTurn: game.currentTurn!,
+        nextPlayerName: nextPlayer?.name || 'Unknown'
+      }
+    };
+
+    this.connectionManager.broadcast(game.gameId, event, attackerId);
+  }
+
+  /**
+   * Broadcast game finished event
+   */
+  private broadcastGameFinished(game: Game, winnerId: string, loserId: string): void {
+    if (!this.connectionManager) return;
+
+    const winner = game.players[winnerId];
+    const loser = game.players[loserId];
+
+    const event: GameFinishedEvent = {
+      type: 'game_finished',
+      gameId: game.gameId,
+      timestamp: new Date().toISOString(),
+      data: {
+        winnerId,
+        winnerName: winner?.name || 'Unknown',
+        loserId,
+        loserName: loser?.name || 'Unknown',
+        phase: 'finished' as const
+      }
+    };
+
+    this.connectionManager.broadcast(game.gameId, event);
   }
 
   destroy(): void {

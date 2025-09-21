@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { GameManager } from '../services/GameManager';
 import { AuthService } from '../services/AuthService';
+import { ConnectionManager } from '../services/ConnectionManager';
 import { AuthMiddleware } from '../middleware/auth';
 import {
   validateCreateGameRequest,
@@ -28,10 +29,45 @@ import {
 
 export function createGameRoutes(
   gameManager: GameManager,
-  authService: AuthService
+  authService: AuthService,
+  connectionManager: ConnectionManager
 ): Router {
   const router = Router();
   const authMiddleware = new AuthMiddleware(authService);
+
+  // GET /api/games/:gameId/events - SSE endpoint for real-time events
+  router.get(
+    '/:gameId/events',
+    addCorrelationId,
+    validateGameId,
+    validateAuthHeader,
+    authMiddleware.authenticatePlayer,
+    authMiddleware.requireGameAccess,
+    asyncErrorHandler(async (req: Request, res: Response): Promise<void> => {
+      const correlationId = req.headers['x-correlation-id'] as string;
+      const { gameId } = req.params;
+      const playerId = req.player!.playerId;
+      const playerName = req.player!.playerName;
+
+      // Validate game exists
+      const game = gameManager.getGame(gameId);
+      if (!game) {
+        throw ErrorFactory.gameNotFound(gameId, correlationId);
+      }
+
+      // Validate player is in the game
+      const player = game.players[playerId];
+      if (!player) {
+        throw ErrorFactory.playerNotFound(playerId, gameId, correlationId);
+      }
+
+      // Set up SSE connection
+      connectionManager.addConnection(gameId, playerId, playerName, res);
+
+      // The response is now handled by ConnectionManager
+      // No need to call res.json() or res.end() here
+    })
+  );
 
   // POST /api/games - Create new game
   router.post(
