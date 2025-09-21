@@ -30,10 +30,29 @@ export interface Ship {
   sunk: boolean;
 }
 
-export interface ShipPlacement {
+// Traditional ship placement format
+export interface TraditionalShipPlacement {
   length: number;
   startPosition: string;
   direction: 'horizontal' | 'vertical';
+}
+
+// Alternative ship placement format using position list
+export interface PositionListShipPlacement {
+  length: number;
+  positions: string[];
+}
+
+// Union type for backward compatibility
+export type ShipPlacement = TraditionalShipPlacement | PositionListShipPlacement;
+
+// Type guards for ship placement formats
+export function isTraditionalShipPlacement(placement: ShipPlacement): placement is TraditionalShipPlacement {
+  return 'startPosition' in placement && 'direction' in placement;
+}
+
+export function isPositionListShipPlacement(placement: ShipPlacement): placement is PositionListShipPlacement {
+  return 'positions' in placement && Array.isArray((placement as PositionListShipPlacement).positions);
 }
 
 export interface AttackResult {
@@ -52,10 +71,19 @@ export interface PlayerToken {
   expiresAt: Date;
 }
 
+export interface ValidationError {
+  message: string;
+  type: 'ship_count' | 'ship_length' | 'ship_overlap' | 'ship_adjacent' | 'ship_bounds' | 'position_format' | 'ship_format';
+  shipIndex?: number;
+  conflictingPositions?: string[];
+  suggestions?: string[];
+}
+
 export interface ValidationResult {
   valid: boolean;
-  errors: string[];
+  errors: ValidationError[];
   conflictingPositions?: string[];
+  suggestions?: string[];
 }
 
 export interface GameEvent {

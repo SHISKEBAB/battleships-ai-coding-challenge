@@ -83,7 +83,18 @@ export class GameManager {
 
     const validation = validateShipPlacements(shipPlacements);
     if (!validation.valid) {
-      throw new Error(`Invalid ship placement: ${validation.errors.join(', ')}`);
+      // Create a detailed error with validation information
+      const errorData = {
+        errors: validation.errors,
+        conflictingPositions: validation.conflictingPositions,
+        suggestions: validation.suggestions
+      };
+
+      const errorMessages = validation.errors.map(e => e.message);
+      const error = new Error(`Invalid ship placement: ${errorMessages.join(', ')}`);
+      // Attach validation details to the error for potential use in error handlers
+      (error as any).validationDetails = errorData;
+      throw error;
     }
 
     const ships = createShipsFromPlacements(shipPlacements);

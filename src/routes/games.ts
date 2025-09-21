@@ -278,13 +278,30 @@ export function createGameRoutes(
       } catch (error) {
         // Convert GameManager errors to proper error types
         if (error instanceof Error) {
-          throw new ShipPlacementError(
-            error.message,
-            undefined,
-            undefined,
-            'ship_placement_validation',
-            correlationId
-          );
+          // Check if the error has detailed validation information
+          const validationDetails = (error as any).validationDetails;
+
+          if (validationDetails) {
+            // Enhanced error with validation details for ship placement errors
+            throw new ShipPlacementError(
+              error.message,
+              undefined, // shipIndex
+              validationDetails.conflictingPositions,
+              'ship_placement_validation',
+              correlationId,
+              validationDetails.errors,
+              validationDetails.suggestions
+            );
+          } else {
+            // Generic ship placement error
+            throw new ShipPlacementError(
+              error.message,
+              undefined,
+              undefined,
+              'ship_placement_validation',
+              correlationId
+            );
+          }
         }
         throw error;
       }

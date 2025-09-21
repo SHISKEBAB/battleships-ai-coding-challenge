@@ -254,9 +254,18 @@ export class ShipPlacementError extends AppError {
     public readonly shipIndex?: number,
     public readonly conflictingPositions?: string[],
     public readonly placementRule?: string,
-    correlationId?: string
+    correlationId?: string,
+    public readonly validationErrors?: any[],
+    public readonly suggestions?: string[]
   ) {
-    super(message, { shipIndex, conflictingPositions, placementRule, violationType: 'ship_placement' }, correlationId);
+    super(message, {
+      shipIndex,
+      conflictingPositions,
+      placementRule,
+      violationType: 'ship_placement',
+      validationErrors,
+      suggestions
+    }, correlationId);
   }
 }
 
