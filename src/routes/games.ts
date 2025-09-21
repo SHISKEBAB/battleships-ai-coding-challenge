@@ -2,8 +2,8 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { GameManager } from '../services/GameManager';
 import { AuthService } from '../services/AuthService';
 import { AuthMiddleware } from '../middleware/auth';
-import { validateCreateGameRequest, validateJoinGameRequest, validateGameId } from '../middleware/validation';
-import { CreateGameRequest, CreateGameResponse, JoinGameRequest, ErrorResponse } from '../types';
+import { validateCreateGameRequest, validateJoinGameRequest, validateGameId, validatePlaceShipsRequest, validateAttackRequest } from '../middleware/validation';
+import { CreateGameRequest, CreateGameResponse, JoinGameRequest, PlaceShipsRequest, AttackRequest, AttackResult, ErrorResponse } from '../types';
 
 interface NotFoundError extends Error {
   name: 'NotFoundError';
@@ -11,6 +11,10 @@ interface NotFoundError extends Error {
 
 interface ConflictError extends Error {
   name: 'ConflictError';
+}
+
+interface ValidationError extends Error {
+  name: 'ValidationError';
 }
 
 function createNotFoundError(message: string): NotFoundError {
@@ -22,6 +26,12 @@ function createNotFoundError(message: string): NotFoundError {
 function createConflictError(message: string): ConflictError {
   const error = new Error(message) as ConflictError;
   error.name = 'ConflictError';
+  return error;
+}
+
+function createValidationError(message: string): ValidationError {
+  const error = new Error(message) as ValidationError;
+  error.name = 'ValidationError';
   return error;
 }
 
@@ -162,6 +172,103 @@ export function createGameRoutes(
 
         res.status(200).json({
           gameId,
+          gameState
+        });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  // POST /api/games/:gameId/ships - Place ships
+  router.post(
+    '/:gameId/ships',
+    validateGameId,
+    validatePlaceShipsRequest,
+    authMiddleware.authenticatePlayer,
+    authMiddleware.requireGameAccess,
+    async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+      try {
+        const { gameId } = req.params;
+        const { ships } = req.body as PlaceShipsRequest;
+        const playerId = req.player!.playerId;
+
+        // Check if game exists
+        const game = gameManager.getGame(gameId);
+        if (!game) {
+          throw createNotFoundError('Game not found');
+        }
+
+        // Check if game is in correct phase for ship placement
+        if (game.phase !== 'waiting' && game.phase !== 'setup') {
+          throw createConflictError('Cannot place ships in current game phase');
+        }
+
+        // Check if player has already placed ships
+        const player = game.players[playerId];
+        if (!player) {
+          throw createNotFoundError('Player not found in game');
+        }
+
+        if (player.ships.length > 0) {
+          throw createConflictError('Ships already placed');
+        }
+
+        // Place ships using GameManager
+        gameManager.placeShips(gameId, playerId, ships);
+
+        // Get updated filtered game state
+        const gameState = gameManager.getFilteredGame(gameId, playerId);
+
+        res.status(200).json({
+          success: true,
+          message: 'Ships placed successfully',
+          gameState
+        });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  // POST /api/games/:gameId/attacks - Make attack
+  router.post(
+    '/:gameId/attacks',
+    validateGameId,
+    validateAttackRequest,
+    authMiddleware.authenticatePlayer,
+    authMiddleware.requireGameAccess,
+    async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+      try {
+        const { gameId } = req.params;
+        const { position } = req.body as AttackRequest;
+        const playerId = req.player!.playerId;
+
+        // Check if game exists
+        const game = gameManager.getGame(gameId);
+        if (!game) {
+          throw createNotFoundError('Game not found');
+        }
+
+        // Check if game is in playing phase
+        if (game.phase !== 'playing') {
+          throw createConflictError('Game is not in playing phase');
+        }
+
+        // Check if it's the player's turn
+        if (game.currentTurn !== playerId) {
+          throw createConflictError('Not your turn');
+        }
+
+        // Process attack using GameManager
+        const attackResult: AttackResult = gameManager.processAttack(gameId, playerId, position);
+
+        // Get updated filtered game state
+        const gameState = gameManager.getFilteredGame(gameId, playerId);
+
+        res.status(200).json({
+          success: true,
+          attack: attackResult,
           gameState
         });
       } catch (error) {

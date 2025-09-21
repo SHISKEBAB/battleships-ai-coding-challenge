@@ -53,5 +53,4 @@ process.on('SIGINT', () => {
   authService.destroy();
   process.exit(0);
 });
-
 export default app;
