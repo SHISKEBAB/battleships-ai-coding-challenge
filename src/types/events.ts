@@ -1,4 +1,5 @@
 import { Ship, AttackResult } from './index';
+import { Response } from 'express';
 
 // Base event interface
 export interface BaseGameEvent {
@@ -16,7 +17,11 @@ export type GameEventType =
   | 'attack_made'
   | 'game_finished'
   | 'player_disconnected'
+  | 'player_reconnected'
   | 'connection_established'
+  | 'game_paused'
+  | 'game_resumed'
+  | 'reconnection_available'
   | 'heartbeat';
 
 // Specific event data interfaces
@@ -77,6 +82,36 @@ export interface HeartbeatEventData {
   gameId: string;
 }
 
+export interface PlayerReconnectedEventData {
+  playerId: string;
+  playerName: string;
+  sessionId: string;
+  reconnectedAt: string;
+  gamePhase: string;
+}
+
+export interface GamePausedEventData {
+  playerId: string;
+  playerName: string;
+  reason: 'disconnect' | 'manual';
+  pausedAt: string;
+  currentTurn?: string;
+}
+
+export interface GameResumedEventData {
+  resumedAt: string;
+  currentTurn?: string;
+  reason: 'reconnect' | 'manual';
+}
+
+export interface ReconnectionAvailableEventData {
+  playerId: string;
+  playerName: string;
+  sessionId: string;
+  gameId: string;
+  availableUntil: string;
+}
+
 // Typed event interfaces
 export interface PlayerJoinedEvent extends BaseGameEvent {
   type: 'player_joined';
@@ -118,6 +153,26 @@ export interface HeartbeatEvent extends BaseGameEvent {
   data: HeartbeatEventData;
 }
 
+export interface PlayerReconnectedEvent extends BaseGameEvent {
+  type: 'player_reconnected';
+  data: PlayerReconnectedEventData;
+}
+
+export interface GamePausedEvent extends BaseGameEvent {
+  type: 'game_paused';
+  data: GamePausedEventData;
+}
+
+export interface GameResumedEvent extends BaseGameEvent {
+  type: 'game_resumed';
+  data: GameResumedEventData;
+}
+
+export interface ReconnectionAvailableEvent extends BaseGameEvent {
+  type: 'reconnection_available';
+  data: ReconnectionAvailableEventData;
+}
+
 // Union type for all possible events
 export type GameEvent =
   | PlayerJoinedEvent
@@ -126,7 +181,11 @@ export type GameEvent =
   | AttackMadeEvent
   | GameFinishedEvent
   | PlayerDisconnectedEvent
+  | PlayerReconnectedEvent
   | ConnectionEstablishedEvent
+  | GamePausedEvent
+  | GameResumedEvent
+  | ReconnectionAvailableEvent
   | HeartbeatEvent;
 
 // Connection interface for SSE management
@@ -137,6 +196,19 @@ export interface PlayerConnection {
   response: Response;
   connectedAt: Date;
   lastHeartbeat: Date;
+  sessionId: string;
+  reconnectionToken?: string;
+}
+
+// Disconnected player session interface for reconnection
+export interface DisconnectedSession {
+  gameId: string;
+  playerId: string;
+  playerName: string;
+  sessionId: string;
+  disconnectedAt: Date;
+  reconnectionToken: string;
+  expiresAt: Date;
 }
 
 // SSE-specific interfaces
@@ -150,5 +222,6 @@ export interface SSEMessage {
 export interface ConnectionStats {
   totalConnections: number;
   connectionsPerGame: Record<string, number>;
+  disconnectedSessions: number;
   uptime: number;
 }

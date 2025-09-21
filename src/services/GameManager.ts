@@ -9,12 +9,15 @@ import {
   ShipsPlacedEvent,
   GameStartedEvent,
   AttackMadeEvent,
-  GameFinishedEvent
+  GameFinishedEvent,
+  GamePausedEvent,
+  GameResumedEvent
 } from '../types/events';
 import { ConnectionManager } from './ConnectionManager';
 
 export class GameManager {
   private games = new Map<string, Game>();
+  private pausedGames = new Map<string, { reason: string; pausedAt: Date; pausedByPlayerId?: string }>();
   private cleanupInterval: NodeJS.Timeout;
   private connectionManager?: ConnectionManager;
 
@@ -117,6 +120,11 @@ export class GameManager {
 
     if (game.phase !== 'playing') {
       throw new Error('Game is not in playing phase');
+    }
+
+    // Check if game is paused
+    if (this.isGamePaused(gameId)) {
+      throw new Error('Game is currently paused due to player disconnection');
     }
 
     if (game.currentTurn !== attackerId) {
@@ -228,9 +236,119 @@ export class GameManager {
   }
 
   /**
+   * Pause a game (typically due to player disconnection)
+   */
+  pauseGame(gameId: string, reason: 'disconnect' | 'manual', playerId?: string): void {
+    const game = this.games.get(gameId);
+    if (!game) {
+      throw new Error('Game not found');
+    }
+
+    // Only pause games that are in playing phase and during a player's turn
+    if (game.phase === 'playing' && game.currentTurn) {
+      this.pausedGames.set(gameId, {
+        reason,
+        pausedAt: new Date(),
+        pausedByPlayerId: playerId
+      });
+
+      // Broadcast game paused event
+      this.broadcastGamePaused(game, reason, playerId);
+
+      console.log(`Game ${gameId} paused due to ${reason}`, {
+        gameId,
+        reason,
+        playerId,
+        currentTurn: game.currentTurn || undefined
+      });
+    }
+  }
+
+  /**
+   * Resume a paused game
+   */
+  resumeGame(gameId: string, playerId?: string): void {
+    const game = this.games.get(gameId);
+    const pauseInfo = this.pausedGames.get(gameId);
+
+    if (!game) {
+      throw new Error('Game not found');
+    }
+
+    if (!pauseInfo) {
+      throw new Error('Game is not paused');
+    }
+
+    // Remove pause state
+    this.pausedGames.delete(gameId);
+
+    // Broadcast game resumed event
+    this.broadcastGameResumed(game, pauseInfo.reason === 'disconnect' ? 'reconnect' : 'manual');
+
+    console.log(`Game ${gameId} resumed`, {
+      gameId,
+      resumedBy: playerId,
+      pausedFor: Date.now() - pauseInfo.pausedAt.getTime()
+    });
+  }
+
+  /**
+   * Check if a game is paused
+   */
+  isGamePaused(gameId: string): boolean {
+    return this.pausedGames.has(gameId);
+  }
+
+  /**
+   * Check if a game can be resumed by a specific player
+   */
+  canResumeGame(gameId: string, playerId: string): boolean {
+    const game = this.games.get(gameId);
+    const pauseInfo = this.pausedGames.get(gameId);
+
+    if (!game || !pauseInfo) {
+      return false;
+    }
+
+    // Game can be resumed if:
+    // 1. It was paused due to disconnect and the reconnecting player is in the game
+    // 2. It was paused manually and any player in the game can resume
+    return (
+      (pauseInfo.reason === 'disconnect' && !!game.players[playerId]) ||
+      (pauseInfo.reason === 'manual' && !!game.players[playerId])
+    );
+  }
+
+  /**
+   * Handle player disconnection - pause game if it's the current player's turn
+   */
+  handlePlayerDisconnect(gameId: string, playerId: string): void {
+    const game = this.games.get(gameId);
+    if (!game) {
+      return;
+    }
+
+    // Only pause if it's the disconnected player's turn and game is in playing phase
+    if (game.phase === 'playing' && game.currentTurn === playerId) {
+      this.pauseGame(gameId, 'disconnect', playerId);
+    }
+  }
+
+  /**
+   * Handle player reconnection - resume game if it was paused due to this player's disconnect
+   */
+  handlePlayerReconnect(gameId: string, playerId: string): void {
+    const pauseInfo = this.pausedGames.get(gameId);
+
+    if (pauseInfo && pauseInfo.reason === 'disconnect' && pauseInfo.pausedByPlayerId === playerId) {
+      this.resumeGame(gameId, playerId);
+    }
+  }
+
+  /**
    * Broadcast player joined event
    */
-  private broadcastPlayerJoined(game: Game, player: Player): void {
+  private broadcastPlayerJoined(game: Game, player: Omit<Player, 'board' | 'ships'>): void {
     if (!this.connectionManager) return;
 
     const event: PlayerJoinedEvent = {
@@ -280,7 +398,7 @@ export class GameManager {
       gameId: game.gameId,
       timestamp: new Date().toISOString(),
       data: {
-        currentTurn: game.currentTurn!,
+        currentTurn: game.currentTurn || undefined!,
         currentPlayerName: currentPlayer?.name || 'Unknown',
         phase: 'playing' as const
       }
@@ -351,10 +469,55 @@ export class GameManager {
     this.connectionManager.broadcast(game.gameId, event);
   }
 
+  /**
+   * Broadcast game paused event
+   */
+  private broadcastGamePaused(game: Game, reason: 'disconnect' | 'manual', playerId?: string): void {
+    if (!this.connectionManager) return;
+
+    const player = playerId ? game.players[playerId] : undefined;
+
+    const event: GamePausedEvent = {
+      type: 'game_paused',
+      gameId: game.gameId,
+      timestamp: new Date().toISOString(),
+      data: {
+        playerId: playerId || 'unknown',
+        playerName: player?.name || 'Unknown',
+        reason,
+        pausedAt: new Date().toISOString(),
+        currentTurn: game.currentTurn || undefined
+      }
+    };
+
+    this.connectionManager.broadcast(game.gameId, event);
+  }
+
+  /**
+   * Broadcast game resumed event
+   */
+  private broadcastGameResumed(game: Game, reason: 'reconnect' | 'manual'): void {
+    if (!this.connectionManager) return;
+
+    const event: GameResumedEvent = {
+      type: 'game_resumed',
+      gameId: game.gameId,
+      timestamp: new Date().toISOString(),
+      data: {
+        resumedAt: new Date().toISOString(),
+        currentTurn: game.currentTurn || undefined,
+        reason
+      }
+    };
+
+    this.connectionManager.broadcast(game.gameId, event);
+  }
+
   destroy(): void {
     if (this.cleanupInterval) {
       clearInterval(this.cleanupInterval);
     }
     this.games.clear();
+    this.pausedGames.clear();
   }
 }

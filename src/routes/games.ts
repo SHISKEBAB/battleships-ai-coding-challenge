@@ -48,6 +48,7 @@ export function createGameRoutes(
       const { gameId } = req.params;
       const playerId = req.player!.playerId;
       const playerName = req.player!.playerName;
+      const reconnectionToken = req.query.reconnectionToken as string;
 
       // Validate game exists
       const game = gameManager.getGame(gameId);
@@ -61,8 +62,20 @@ export function createGameRoutes(
         throw ErrorFactory.playerNotFound(playerId, gameId, correlationId);
       }
 
-      // Set up SSE connection
-      connectionManager.addConnection(gameId, playerId, playerName, res);
+      // Set up SSE connection (with optional reconnection token)
+      const { sessionId, isReconnection } = connectionManager.addConnection(gameId, playerId, playerName, res, reconnectionToken);
+
+      // Log the connection type
+      if (isReconnection) {
+        console.log('Player reconnected via SSE', {
+          service: 'GameRoutes',
+          action: 'player_reconnected',
+          gameId,
+          playerId,
+          sessionId,
+          correlationId
+        });
+      }
 
       // The response is now handled by ConnectionManager
       // No need to call res.json() or res.end() here
@@ -352,6 +365,160 @@ export function createGameRoutes(
         success: true,
         attack: attackResult,
         gameState
+      });
+    })
+  );
+
+  // GET /api/games/:gameId/reconnect/:playerId - Get reconnection info
+  router.get(
+    '/:gameId/reconnect/:playerId',
+    addCorrelationId,
+    validateGameId,
+    asyncErrorHandler(async (req: Request, res: Response): Promise<void> => {
+      const correlationId = req.headers['x-correlation-id'] as string;
+      const { gameId, playerId } = req.params;
+
+      // Validate game exists
+      const game = gameManager.getGame(gameId);
+      if (!game) {
+        throw ErrorFactory.gameNotFound(gameId, correlationId);
+      }
+
+      // Validate player is in the game
+      const player = game.players[playerId];
+      if (!player) {
+        throw ErrorFactory.playerNotFound(playerId, gameId, correlationId);
+      }
+
+      // Check if reconnection is available
+      const reconnectionToken = connectionManager.getReconnectionToken(gameId, playerId);
+      const disconnectedPlayers = connectionManager.getDisconnectedPlayers(gameId);
+      const playerDisconnectedSession = disconnectedPlayers.find(session => session.playerId === playerId);
+
+      if (!reconnectionToken || !playerDisconnectedSession) {
+        res.status(404).json({
+          error: 'No reconnection available',
+          message: 'Player is not disconnected or reconnection has expired',
+          correlationId
+        });
+        return;
+      }
+
+      res.status(200).json({
+        gameId,
+        playerId,
+        playerName: player.name,
+        reconnectionToken,
+        sessionId: playerDisconnectedSession.sessionId,
+        disconnectedAt: playerDisconnectedSession.disconnectedAt.toISOString(),
+        expiresAt: playerDisconnectedSession.expiresAt.toISOString(),
+        gameState: gameManager.getFilteredGame(gameId, playerId)
+      });
+    })
+  );
+
+  // POST /api/games/:gameId/reconnect - Reconnect to a game
+  router.post(
+    '/:gameId/reconnect',
+    addCorrelationId,
+    validateGameId,
+    asyncErrorHandler(async (req: Request, res: Response): Promise<void> => {
+      const correlationId = req.headers['x-correlation-id'] as string;
+      const { gameId } = req.params;
+      const { playerId, reconnectionToken } = req.body;
+
+      if (!playerId || !reconnectionToken) {
+        throw new ValidationError(
+          'Missing required fields: playerId and reconnectionToken',
+          'request_validation',
+          ['missing_fields'],
+          correlationId
+        );
+      }
+
+      // Validate game exists
+      const game = gameManager.getGame(gameId);
+      if (!game) {
+        throw ErrorFactory.gameNotFound(gameId, correlationId);
+      }
+
+      // Validate player is in the game
+      const player = game.players[playerId];
+      if (!player) {
+        throw ErrorFactory.playerNotFound(playerId, gameId, correlationId);
+      }
+
+      // Validate reconnection token
+      if (!connectionManager.canPlayerReconnect(gameId, playerId, reconnectionToken)) {
+        throw new ValidationError(
+          'Invalid or expired reconnection token',
+          'reconnection_validation',
+          ['invalid_token'],
+          correlationId
+        );
+      }
+
+      // Generate new auth token for the reconnecting player
+      const playerToken = authService.generatePlayerToken(
+        gameId,
+        playerId,
+        player.name
+      );
+
+      // Get current game state
+      const gameState = gameManager.getFilteredGame(gameId, playerId);
+
+      // Check if game was paused and can be resumed
+      const canResumeGame = gameManager.canResumeGame(gameId, playerId);
+      if (canResumeGame) {
+        gameManager.resumeGame(gameId, playerId);
+      }
+
+      res.status(200).json({
+        success: true,
+        message: 'Reconnection successful',
+        gameId,
+        playerId,
+        playerToken,
+        reconnectionToken,
+        gameState,
+        gameResumed: canResumeGame
+      });
+    })
+  );
+
+  // GET /api/games/:gameId/disconnected - Get list of disconnected players
+  router.get(
+    '/:gameId/disconnected',
+    addCorrelationId,
+    validateGameId,
+    validateAuthHeader,
+    authMiddleware.authenticatePlayer,
+    authMiddleware.requireGameAccess,
+    asyncErrorHandler(async (req: Request, res: Response): Promise<void> => {
+      const correlationId = req.headers['x-correlation-id'] as string;
+      const { gameId } = req.params;
+
+      // Validate game exists
+      const game = gameManager.getGame(gameId);
+      if (!game) {
+        throw ErrorFactory.gameNotFound(gameId, correlationId);
+      }
+
+      const disconnectedPlayers = connectionManager.getDisconnectedPlayers(gameId);
+      const connectedPlayers = connectionManager.getConnectedPlayers(gameId);
+
+      res.status(200).json({
+        gameId,
+        connectedPlayers,
+        disconnectedPlayers: disconnectedPlayers.map(session => ({
+          playerId: session.playerId,
+          playerName: session.playerName,
+          sessionId: session.sessionId,
+          disconnectedAt: session.disconnectedAt.toISOString(),
+          expiresAt: session.expiresAt.toISOString()
+        })),
+        isPaused: gameManager.isGamePaused(gameId)
       });
     })
   );

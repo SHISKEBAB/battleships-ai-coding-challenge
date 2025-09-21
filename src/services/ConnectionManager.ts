@@ -1,20 +1,30 @@
 import { Response } from 'express';
-import { logger } from '../middleware/logger';
+import { randomUUID } from 'crypto';
 import {
   PlayerConnection,
+  DisconnectedSession,
   GameEvent,
   ConnectionStats,
   SSEMessage,
   GameEventType,
-  HeartbeatEvent
+  HeartbeatEvent,
+  PlayerDisconnectedEvent,
+  PlayerReconnectedEvent,
+  ReconnectionAvailableEvent
 } from '../types/events';
 
 export class ConnectionManager {
   private connections = new Map<string, PlayerConnection>();
   private gameConnections = new Map<string, Set<string>>();
+  private disconnectedSessions = new Map<string, DisconnectedSession>();
   private heartbeatInterval: NodeJS.Timeout;
   private cleanupInterval: NodeJS.Timeout;
+  private sessionCleanupInterval: NodeJS.Timeout;
   private startTime: Date;
+  private reconnectionTimeoutMs = 5 * 60 * 1000; // 5 minutes
+  private heartbeatTimeoutMs = 90000; // 90 seconds (increased for better disconnect detection)
+  private onPlayerDisconnect?: (gameId: string, playerId: string) => void;
+  private onPlayerReconnect?: (gameId: string, playerId: string) => void;
 
   constructor() {
     this.startTime = new Date();
@@ -29,22 +39,74 @@ export class ConnectionManager {
       this.cleanupStaleConnections();
     }, 60000);
 
-    logger.info('ConnectionManager initialized', {
+    // Clean up expired disconnected sessions every 2 minutes
+    this.sessionCleanupInterval = setInterval(() => {
+      this.cleanupExpiredSessions();
+    }, 120000);
+
+    console.log('ConnectionManager initialized', {
       service: 'ConnectionManager',
       action: 'initialize',
       heartbeatInterval: 30000,
-      cleanupInterval: 60000
+      cleanupInterval: 60000,
+      sessionCleanupInterval: 120000,
+      reconnectionTimeoutMs: this.reconnectionTimeoutMs
     });
+  }
+
+  /**
+   * Set disconnect/reconnect event handlers
+   */
+  setEventHandlers(
+    onPlayerDisconnect?: (gameId: string, playerId: string) => void,
+    onPlayerReconnect?: (gameId: string, playerId: string) => void
+  ): void {
+    this.onPlayerDisconnect = onPlayerDisconnect;
+    this.onPlayerReconnect = onPlayerReconnect;
   }
 
   /**
    * Add a new SSE connection for a player in a game
    */
-  addConnection(gameId: string, playerId: string, playerName: string, response: Response): void {
+  addConnection(
+    gameId: string,
+    playerId: string,
+    playerName: string,
+    response: Response,
+    reconnectionToken?: string
+  ): { sessionId: string; isReconnection: boolean } {
     const connectionKey = this.getConnectionKey(gameId, playerId);
+    const sessionKey = this.getSessionKey(gameId, playerId);
+
+    let sessionId: string;
+    let isReconnection = false;
+
+    // Check if this is a reconnection attempt
+    if (reconnectionToken) {
+      const disconnectedSession = this.disconnectedSessions.get(sessionKey);
+      if (disconnectedSession && disconnectedSession.reconnectionToken === reconnectionToken) {
+        sessionId = disconnectedSession.sessionId;
+        isReconnection = true;
+        this.disconnectedSessions.delete(sessionKey);
+
+        console.log('Player reconnecting', {
+          service: 'ConnectionManager',
+          action: 'player_reconnection',
+          gameId,
+          playerId,
+          playerName,
+          sessionId
+        });
+      } else {
+        throw new Error('Invalid or expired reconnection token');
+      }
+    } else {
+      // Generate new session ID for new connections
+      sessionId = randomUUID();
+    }
 
     // Remove existing connection if any
-    this.removeConnection(gameId, playerId);
+    this.removeConnection(gameId, playerId, false); // Don't create disconnected session for immediate reconnect
 
     // Setup SSE headers
     response.writeHead(200, {
@@ -63,7 +125,9 @@ export class ConnectionManager {
       playerName,
       response,
       connectedAt: new Date(),
-      lastHeartbeat: new Date()
+      lastHeartbeat: new Date(),
+      sessionId,
+      reconnectionToken
     };
 
     // Store connection
@@ -77,34 +141,40 @@ export class ConnectionManager {
 
     // Handle connection close
     response.on('close', () => {
-      this.removeConnection(gameId, playerId);
-      logger.info('SSE connection closed', {
-        service: 'ConnectionManager',
-        action: 'connection_closed',
-        gameId,
-        playerId,
-        playerName
-      });
+      this.handleConnectionClose(gameId, playerId, sessionId, 'client_close');
     });
 
     response.on('error', (error) => {
-      logger.error('SSE connection error', {
+      console.error('SSE connection error', {
         service: 'ConnectionManager',
         action: 'connection_error',
         gameId,
         playerId,
         playerName,
+        sessionId,
         error: error.message
       });
-      this.removeConnection(gameId, playerId);
+      this.handleConnectionClose(gameId, playerId, sessionId, 'connection_error');
     });
 
-    logger.info('SSE connection established', {
+    if (isReconnection) {
+      // Broadcast reconnection event
+      this.broadcastPlayerReconnected(gameId, playerId, playerName, sessionId);
+
+      // Notify game manager
+      if (this.onPlayerReconnect) {
+        this.onPlayerReconnect(gameId, playerId);
+      }
+    }
+
+    console.info('SSE connection established', {
       service: 'ConnectionManager',
-      action: 'connection_added',
+      action: isReconnection ? 'connection_reestablished' : 'connection_added',
       gameId,
       playerId,
       playerName,
+      sessionId,
+      isReconnection,
       totalConnections: this.connections.size
     });
 
@@ -116,16 +186,18 @@ export class ConnectionManager {
       data: {
         playerId,
         playerName,
-        gamePhase: 'connected',
+        gamePhase: isReconnection ? 'reconnected' : 'connected',
         connectedAt: connection.connectedAt.toISOString()
       }
     });
+
+    return { sessionId, isReconnection };
   }
 
   /**
    * Remove a connection for a player in a game
    */
-  removeConnection(gameId: string, playerId: string): void {
+  removeConnection(gameId: string, playerId: string, createDisconnectedSession = true): void {
     const connectionKey = this.getConnectionKey(gameId, playerId);
     const connection = this.connections.get(connectionKey);
 
@@ -136,13 +208,18 @@ export class ConnectionManager {
           connection.response.end();
         }
       } catch (error) {
-        logger.warn('Error closing SSE response', {
+        console.warn('Error closing SSE response', {
           service: 'ConnectionManager',
           action: 'connection_close_error',
           gameId,
           playerId,
           error: error instanceof Error ? error.message : 'Unknown error'
         });
+      }
+
+      // Create disconnected session for potential reconnection
+      if (createDisconnectedSession) {
+        this.createDisconnectedSession(connection);
       }
 
       // Remove from connections
@@ -157,13 +234,15 @@ export class ConnectionManager {
         }
       }
 
-      logger.info('SSE connection removed', {
+      console.info('SSE connection removed', {
         service: 'ConnectionManager',
         action: 'connection_removed',
         gameId,
         playerId,
         playerName: connection.playerName,
-        totalConnections: this.connections.size
+        sessionId: connection.sessionId,
+        totalConnections: this.connections.size,
+        disconnectedSessionCreated: createDisconnectedSession
       });
     }
   }
@@ -174,7 +253,7 @@ export class ConnectionManager {
   broadcast(gameId: string, event: GameEvent, excludePlayer?: string): void {
     const gameConnections = this.gameConnections.get(gameId);
     if (!gameConnections || gameConnections.size === 0) {
-      logger.debug('No connections to broadcast to', {
+      console.debug('No connections to broadcast to', {
         service: 'ConnectionManager',
         action: 'broadcast_no_connections',
         gameId,
@@ -202,7 +281,7 @@ export class ConnectionManager {
       }
     }
 
-    logger.info('Event broadcasted', {
+    console.info('Event broadcasted', {
       service: 'ConnectionManager',
       action: 'broadcast_complete',
       gameId,
@@ -251,12 +330,55 @@ export class ConnectionManager {
       }
     }
 
-    logger.info('All game connections closed', {
+    console.info('All game connections closed', {
       service: 'ConnectionManager',
       action: 'close_game_connections',
       gameId,
       closedConnections: connectionsToClose.length
     });
+  }
+
+  /**
+   * Get reconnection token for a disconnected player
+   */
+  getReconnectionToken(gameId: string, playerId: string): string | null {
+    const sessionKey = this.getSessionKey(gameId, playerId);
+    const disconnectedSession = this.disconnectedSessions.get(sessionKey);
+
+    if (disconnectedSession && disconnectedSession.expiresAt > new Date()) {
+      return disconnectedSession.reconnectionToken;
+    }
+
+    return null;
+  }
+
+  /**
+   * Check if a player can reconnect
+   */
+  canPlayerReconnect(gameId: string, playerId: string, reconnectionToken: string): boolean {
+    const sessionKey = this.getSessionKey(gameId, playerId);
+    const disconnectedSession = this.disconnectedSessions.get(sessionKey);
+
+    return !!(
+      disconnectedSession &&
+      disconnectedSession.reconnectionToken === reconnectionToken &&
+      disconnectedSession.expiresAt > new Date()
+    );
+  }
+
+  /**
+   * Get all disconnected players for a game
+   */
+  getDisconnectedPlayers(gameId: string): DisconnectedSession[] {
+    const disconnectedPlayers: DisconnectedSession[] = [];
+
+    for (const session of this.disconnectedSessions.values()) {
+      if (session.gameId === gameId && session.expiresAt > new Date()) {
+        disconnectedPlayers.push(session);
+      }
+    }
+
+    return disconnectedPlayers;
   }
 
   /**
@@ -272,6 +394,7 @@ export class ConnectionManager {
     return {
       totalConnections: this.connections.size,
       connectionsPerGame,
+      disconnectedSessions: this.disconnectedSessions.size,
       uptime: Date.now() - this.startTime.getTime()
     };
   }
@@ -306,7 +429,7 @@ export class ConnectionManager {
       }
     }
 
-    logger.debug('Heartbeat sent', {
+    console.debug('Heartbeat sent', {
       service: 'ConnectionManager',
       action: 'heartbeat',
       activeConnections,
@@ -320,27 +443,28 @@ export class ConnectionManager {
    */
   private cleanupStaleConnections(): void {
     const now = new Date();
-    const staleThreshold = 120000; // 2 minutes
-    const connectionsToRemove: Array<{ gameId: string; playerId: string }> = [];
+    const connectionsToRemove: Array<{ gameId: string; playerId: string; sessionId: string; reason: string }> = [];
 
     for (const [connectionKey, connection] of this.connections.entries()) {
       const timeSinceHeartbeat = now.getTime() - connection.lastHeartbeat.getTime();
 
-      if (timeSinceHeartbeat > staleThreshold) {
+      if (timeSinceHeartbeat > this.heartbeatTimeoutMs) {
         connectionsToRemove.push({
           gameId: connection.gameId,
-          playerId: connection.playerId
+          playerId: connection.playerId,
+          sessionId: connection.sessionId,
+          reason: 'heartbeat_timeout'
         });
       }
     }
 
     // Remove stale connections
-    for (const { gameId, playerId } of connectionsToRemove) {
-      this.removeConnection(gameId, playerId);
+    for (const { gameId, playerId, sessionId, reason } of connectionsToRemove) {
+      this.handleConnectionClose(gameId, playerId, sessionId, reason);
     }
 
     if (connectionsToRemove.length > 0) {
-      logger.info('Stale connections cleaned up', {
+      console.info('Stale connections cleaned up', {
         service: 'ConnectionManager',
         action: 'cleanup_stale_connections',
         removedConnections: connectionsToRemove.length,
@@ -377,7 +501,7 @@ export class ConnectionManager {
       connection.response.write(message);
       return true;
     } catch (error) {
-      logger.error('Failed to send SSE message', {
+      console.error('Failed to send SSE message', {
         service: 'ConnectionManager',
         action: 'send_message_error',
         connectionKey,
@@ -398,6 +522,160 @@ export class ConnectionManager {
   }
 
   /**
+   * Generate session key for disconnected sessions
+   */
+  private getSessionKey(gameId: string, playerId: string): string {
+    return `${gameId}:${playerId}:session`;
+  }
+
+  /**
+   * Handle connection close with disconnect reason tracking
+   */
+  private handleConnectionClose(gameId: string, playerId: string, sessionId: string, reason: string): void {
+    const connection = this.connections.get(this.getConnectionKey(gameId, playerId));
+
+    if (connection) {
+      // Broadcast player disconnected event
+      this.broadcastPlayerDisconnected(gameId, playerId, connection.playerName, reason);
+
+      // Notify game manager
+      if (this.onPlayerDisconnect) {
+        this.onPlayerDisconnect(gameId, playerId);
+      }
+    }
+
+    // Remove the connection and create disconnected session
+    this.removeConnection(gameId, playerId, true);
+
+    console.log('Connection closed with disconnect handling', {
+      service: 'ConnectionManager',
+      action: 'connection_closed_handled',
+      gameId,
+      playerId,
+      sessionId,
+      reason
+    });
+  }
+
+  /**
+   * Create a disconnected session for potential reconnection
+   */
+  private createDisconnectedSession(connection: PlayerConnection): void {
+    const sessionKey = this.getSessionKey(connection.gameId, connection.playerId);
+    const reconnectionToken = randomUUID();
+    const expiresAt = new Date(Date.now() + this.reconnectionTimeoutMs);
+
+    const disconnectedSession: DisconnectedSession = {
+      gameId: connection.gameId,
+      playerId: connection.playerId,
+      playerName: connection.playerName,
+      sessionId: connection.sessionId,
+      disconnectedAt: new Date(),
+      reconnectionToken,
+      expiresAt
+    };
+
+    this.disconnectedSessions.set(sessionKey, disconnectedSession);
+
+    // Broadcast reconnection available event to other players
+    this.broadcastReconnectionAvailable(connection.gameId, connection.playerId, connection.playerName, connection.sessionId, expiresAt);
+
+    console.log('Disconnected session created', {
+      service: 'ConnectionManager',
+      action: 'disconnected_session_created',
+      gameId: connection.gameId,
+      playerId: connection.playerId,
+      sessionId: connection.sessionId,
+      expiresAt: expiresAt.toISOString()
+    });
+  }
+
+  /**
+   * Clean up expired disconnected sessions
+   */
+  private cleanupExpiredSessions(): void {
+    const now = new Date();
+    const expiredSessions: string[] = [];
+
+    for (const [sessionKey, session] of this.disconnectedSessions.entries()) {
+      if (session.expiresAt <= now) {
+        expiredSessions.push(sessionKey);
+      }
+    }
+
+    for (const sessionKey of expiredSessions) {
+      this.disconnectedSessions.delete(sessionKey);
+    }
+
+    if (expiredSessions.length > 0) {
+      console.log('Expired disconnected sessions cleaned up', {
+        service: 'ConnectionManager',
+        action: 'cleanup_expired_sessions',
+        expiredSessions: expiredSessions.length,
+        remainingSessions: this.disconnectedSessions.size
+      });
+    }
+  }
+
+  /**
+   * Broadcast player disconnected event
+   */
+  private broadcastPlayerDisconnected(gameId: string, playerId: string, playerName: string, reason: string): void {
+    const event: PlayerDisconnectedEvent = {
+      type: 'player_disconnected',
+      gameId,
+      timestamp: new Date().toISOString(),
+      data: {
+        playerId,
+        playerName,
+        remainingPlayers: this.getConnectedPlayers(gameId).length - 1 // -1 because we're about to remove this player
+      }
+    };
+
+    this.broadcast(gameId, event, playerId);
+  }
+
+  /**
+   * Broadcast player reconnected event
+   */
+  private broadcastPlayerReconnected(gameId: string, playerId: string, playerName: string, sessionId: string): void {
+    const event: PlayerReconnectedEvent = {
+      type: 'player_reconnected',
+      gameId,
+      timestamp: new Date().toISOString(),
+      data: {
+        playerId,
+        playerName,
+        sessionId,
+        reconnectedAt: new Date().toISOString(),
+        gamePhase: 'reconnected'
+      }
+    };
+
+    this.broadcast(gameId, event, playerId);
+  }
+
+  /**
+   * Broadcast reconnection available event
+   */
+  private broadcastReconnectionAvailable(gameId: string, playerId: string, playerName: string, sessionId: string, availableUntil: Date): void {
+    const event: ReconnectionAvailableEvent = {
+      type: 'reconnection_available',
+      gameId,
+      timestamp: new Date().toISOString(),
+      data: {
+        playerId,
+        playerName,
+        sessionId,
+        gameId,
+        availableUntil: availableUntil.toISOString()
+      }
+    };
+
+    this.broadcast(gameId, event, playerId);
+  }
+
+  /**
    * Cleanup resources when shutting down
    */
   destroy(): void {
@@ -407,6 +685,9 @@ export class ConnectionManager {
     }
     if (this.cleanupInterval) {
       clearInterval(this.cleanupInterval);
+    }
+    if (this.sessionCleanupInterval) {
+      clearInterval(this.sessionCleanupInterval);
     }
 
     // Close all connections
@@ -423,8 +704,9 @@ export class ConnectionManager {
     // Clear maps
     this.connections.clear();
     this.gameConnections.clear();
+    this.disconnectedSessions.clear();
 
-    logger.info('ConnectionManager destroyed', {
+    console.info('ConnectionManager destroyed', {
       service: 'ConnectionManager',
       action: 'destroy'
     });

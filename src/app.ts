@@ -36,6 +36,12 @@ const connectionManager = new ConnectionManager();
 const gameManager = new GameManager(connectionManager);
 const authService = new AuthService();
 
+// Wire up disconnect/reconnect event handlers
+connectionManager.setEventHandlers(
+  (gameId: string, playerId: string) => gameManager.handlePlayerDisconnect(gameId, playerId),
+  (gameId: string, playerId: string) => gameManager.handlePlayerReconnect(gameId, playerId)
+);
+
 // CORS configuration
 app.use(cors({
   origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
@@ -89,7 +95,7 @@ app.get('/health', asyncErrorHandler(async (req: express.Request, res: express.R
 app.use('/api/games', createGameRoutes(gameManager, authService, connectionManager));
 
 // Handle 404 for unmatched routes
-app.use('*', notFoundHandler);
+app.use(notFoundHandler);
 
 // Global error handler (must be last)
 app.use(errorHandler);

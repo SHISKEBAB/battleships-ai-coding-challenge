@@ -1,0 +1,75 @@
+# Battleships API Enhanced Validation Demo
+# Run these commands after starting the server with: npm start
+
+echo "🎮 Battleships API Enhanced Validation Demo"
+echo "============================================"
+
+echo ""
+echo "1. Testing invalid JSON (malformed):"
+curl -X POST http://localhost:3000/api/games \
+  -H "Content-Type: application/json" \
+  -d '{"playerName": "Test' \
+  | jq .
+
+echo ""
+echo "2. Testing missing required field:"
+curl -X POST http://localhost:3000/api/games \
+  -H "Content-Type: application/json" \
+  -d '{}' \
+  | jq .
+
+echo ""
+echo "3. Testing invalid field type:"
+curl -X POST http://localhost:3000/api/games \
+  -H "Content-Type: application/json" \
+  -d '{"playerName": 123}' \
+  | jq .
+
+echo ""
+echo "4. Testing field length validation:"
+curl -X POST http://localhost:3000/api/games \
+  -H "Content-Type: application/json" \
+  -d '{"playerName": "'$(printf 'a%.0s' {1..51})'"}' \
+  | jq .
+
+echo ""
+echo "5. Testing input sanitization (XSS attempt):"
+curl -X POST http://localhost:3000/api/games \
+  -H "Content-Type: application/json" \
+  -d '{"playerName": "<script>alert(\"xss\")</script>TestPlayer"}' \
+  | jq .
+
+echo ""
+echo "6. Testing valid request (should succeed):"
+curl -X POST http://localhost:3000/api/games \
+  -H "Content-Type: application/json" \
+  -d '{"playerName": "ValidPlayer"}' \
+  | jq .
+
+echo ""
+echo "7. Testing invalid UUID format:"
+curl -X GET http://localhost:3000/api/games/invalid-uuid \
+  -H "Authorization: Bearer fake-token" \
+  | jq .
+
+echo ""
+echo "8. Testing missing authorization header:"
+curl -X GET http://localhost:3000/api/games/550e8400-e29b-41d4-a716-446655440000 \
+  | jq .
+
+echo ""
+echo "9. Testing health endpoint:"
+curl -X GET http://localhost:3000/health \
+  | jq .
+
+echo ""
+echo "10. Testing 404 route:"
+curl -X GET http://localhost:3000/api/nonexistent \
+  | jq .
+
+echo ""
+echo "✅ Demo completed! All responses should show:"
+echo "- Proper error codes and messages"
+echo "- Correlation IDs for tracking"
+echo "- Consistent error response format"
+echo "- No sensitive information leakage"
