@@ -1,0 +1,1031 @@
+openapi: 3.0.3
+info:
+  title: Battleships AI Coding Challenge API
+  description: |
+    A standardized REST API for building AI-powered battleships game clients. This API enables developers to create intelligent game bots that can compete against each other in the classic naval strategy game.
+    
+    ## Features
+    - Create and manage battleship games
+    - Place ships on game boards
+    - Make attacks and track game progress
+    - Real-time game state management
+    - Comprehensive error handling
+    
+    ## Authentication
+    All endpoints require API key authentication using Bearer token in the Authorization header.
+    
+    ## Rate Limits
+    - Game Creation: 10 games per hour
+    - Attacks: 1 per second per game
+    - State Queries: 30 per minute per game
+    - General Requests: 1000 per hour
+  version: 1.0.0
+  contact:
+    name: Battleships API Support
+    email: support@battleships-challenge.com
+    url: https://docs.battleships-challenge.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: https://api.battleships-challenge.com/v1
+    description: Production server
+  - url: https://staging-api.battleships-challenge.com/v1
+    description: Staging server
+  - url: http://localhost:3000/v1
+    description: Local development server
+
+security:
+  - bearerAuth: []
+
+paths:
+  /games:
+    post:
+      tags:
+        - Game Management
+      summary: Create a new battleships game
+      description: |
+        Creates a new game instance with specified parameters. The game will be in 
+        `awaiting_ship_placement` status and ready for ship placement.
+      operationId: createGame
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGameRequest'
+            examples:
+              basic:
+                summary: Basic game creation
+                value:
+                  player_name: "AI_Player_1"
+                  difficulty: "medium"
+              advanced:
+                summary: Custom board size and time limit
+                value:
+                  player_name: "Advanced_AI"
+                  difficulty: "hard"
+                  board_size: 12
+                  time_limit: 180
+      responses:
+        '201':
+          description: Game created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameCreatedResponse'
+              examples:
+                success:
+                  summary: Successful game creation
+                  value:
+                    game_id: "game_7f8a9b2c"
+                    player_name: "AI_Player_1"
+                    status: "awaiting_ship_placement"
+                    board_size: 10
+                    time_limit: 300
+                    ships_to_place:
+                      - type: "carrier"
+                        size: 5
+                        quantity: 1
+                      - type: "battleship"
+                        size: 4
+                        quantity: 1
+                      - type: "cruiser"
+                        size: 3
+                        quantity: 1
+                      - type: "submarine"
+                        size: 3
+                        quantity: 1
+                      - type: "destroyer"
+                        size: 2
+                        quantity: 1
+                    created_at: "2024-01-15T10:30:00Z"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+    get:
+      tags:
+        - Game Management
+      summary: List all games for the authenticated user
+      description: Retrieves a paginated list of games associated with the API key
+      operationId: listGames
+      parameters:
+        - name: status
+          in: query
+          description: Filter games by status
+          required: false
+          schema:
+            $ref: '#/components/schemas/GameStatus'
+        - name: limit
+          in: query
+          description: Maximum number of games to return
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: offset
+          in: query
+          description: Number of games to skip
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: List of games retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+
+  /games/{gameId}:
+    get:
+      tags:
+        - Game Management
+      summary: Get game information
+      description: Retrieves detailed information about a specific game
+      operationId: getGame
+      parameters:
+        - $ref: '#/components/parameters/GameId'
+      responses:
+        '200':
+          description: Game information retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameResponse'
+              examples:
+                in_progress:
+                  summary: Game in progress
+                  value:
+                    game_id: "game_7f8a9b2c"
+                    player_name: "AI_Player_1"
+                    status: "in_progress"
+                    board_size: 10
+                    current_turn: "player"
+                    moves_made: 15
+                    ships_remaining:
+                      player: 3
+                      opponent: 2
+                    time_remaining: 245
+                    last_move:
+                      player: "opponent"
+                      coordinates: [3, 7]
+                      result: "miss"
+                      timestamp: "2024-01-15T10:35:22Z"
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    delete:
+      tags:
+        - Game Management
+      summary: Delete a game
+      description: Terminates and removes a game instance
+      operationId: deleteGame
+      parameters:
+        - $ref: '#/components/parameters/GameId'
+      responses:
+        '200':
+          description: Game deleted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameDeleteResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /games/{gameId}/ships:
+    post:
+      tags:
+        - Ship Placement
+      summary: Place ships on the game board
+      description: |
+        Places all required ships on the game board. Ships must be placed according to game rules:
+        - Ships must be placed horizontally or vertically (no diagonal)
+        - Ships cannot overlap or be adjacent
+        - All ships must be within board boundaries
+        - Ship size must match type requirements
+      operationId: placeShips
+      parameters:
+        - $ref: '#/components/parameters/GameId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlaceShipsRequest'
+            examples:
+              standard_placement:
+                summary: Standard ship placement
+                value:
+                  ships:
+                    - type: "carrier"
+                      coordinates: [[1,1], [1,2], [1,3], [1,4], [1,5]]
+                    - type: "battleship"
+                      coordinates: [[3,1], [3,2], [3,3], [3,4]]
+                    - type: "cruiser"
+                      coordinates: [[5,1], [5,2], [5,3]]
+                    - type: "submarine"
+                      coordinates: [[7,1], [7,2], [7,3]]
+                    - type: "destroyer"
+                      coordinates: [[9,1], [9,2]]
+      responses:
+        '200':
+          description: Ships placed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaceShipsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /games/{gameId}/attack:
+    post:
+      tags:
+        - Gameplay
+      summary: Make an attack on opponent's board
+      description: |
+        Attacks a coordinate on the opponent's board. Returns the result of the attack
+        and updates the game state. Only valid when it's the player's turn.
+      operationId: makeAttack
+      parameters:
+        - $ref: '#/components/parameters/GameId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttackRequest'
+            examples:
+              basic_attack:
+                summary: Basic attack
+                value:
+                  coordinates: [4, 6]
+              timed_attack:
+                summary: Attack with timestamp
+                value:
+                  coordinates: [7, 3]
+                  timestamp: "2024-01-15T10:35:00Z"
+      responses:
+        '200':
+          description: Attack processed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttackResponse'
+              examples:
+                hit:
+                  summary: Successful hit
+                  value:
+                    attack_result: "hit"
+                    coordinates: [4, 6]
+                    ship_hit: "battleship"
+                    ship_sunk: false
+                    game_status: "in_progress"
+                    your_turn: false
+                    opponent_ships_remaining: 4
+                    next_move_deadline: "2024-01-15T10:40:00Z"
+                miss:
+                  summary: Attack missed
+                  value:
+                    attack_result: "miss"
+                    coordinates: [2, 3]
+                    game_status: "in_progress"
+                    your_turn: false
+                    opponent_ships_remaining: 5
+                    next_move_deadline: "2024-01-15T10:40:00Z"
+                sunk:
+                  summary: Ship sunk
+                  value:
+                    attack_result: "sunk"
+                    coordinates: [5, 7]
+                    ship_hit: "destroyer"
+                    ship_sunk: true
+                    game_status: "in_progress"
+                    your_turn: false
+                    opponent_ships_remaining: 3
+                    next_move_deadline: "2024-01-15T10:40:00Z"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /games/{gameId}/attacks:
+    get:
+      tags:
+        - Gameplay
+      summary: Get attack history
+      description: Retrieves the complete attack history for the game with optional filtering
+      operationId: getAttackHistory
+      parameters:
+        - $ref: '#/components/parameters/GameId'
+        - name: player
+          in: query
+          description: Filter attacks by player
+          required: false
+          schema:
+            type: string
+            enum: [self, opponent]
+        - name: result
+          in: query
+          description: Filter attacks by result
+          required: false
+          schema:
+            $ref: '#/components/schemas/AttackResult'
+        - name: limit
+          in: query
+          description: Maximum number of attacks to return
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: offset
+          in: query
+          description: Number of attacks to skip
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Attack history retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttackHistoryResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /games/{gameId}/board:
+    get:
+      tags:
+        - Game State
+      summary: Get current board state
+      description: |
+        Retrieves the current state of both player and opponent boards.
+        Shows ship positions, hits, misses, and remaining ships.
+      operationId: getBoardState
+      parameters:
+        - $ref: '#/components/parameters/GameId'
+      responses:
+        '200':
+          description: Board state retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BoardStateResponse'
+              examples:
+                mid_game:
+                  summary: Mid-game board state
+                  value:
+                    game_id: "game_7f8a9b2c"
+                    your_board:
+                      size: 10
+                      ships:
+                        - type: "carrier"
+                          coordinates: [[1,1], [1,2], [1,3], [1,4], [1,5]]
+                          hits: [[1,2], [1,4]]
+                          status: "damaged"
+                        - type: "destroyer"
+                          coordinates: [[9,1], [9,2]]
+                          hits: [[9,1], [9,2]]
+                          status: "sunk"
+                      attacks_received:
+                        - coordinates: [1,2]
+                          result: "hit"
+                        - coordinates: [3,3]
+                          result: "miss"
+                        - coordinates: [1,4]
+                          result: "hit"
+                        - coordinates: [9,1]
+                          result: "sunk"
+                        - coordinates: [9,2]
+                          result: "sunk"
+                    opponent_board:
+                      size: 10
+                      known_cells:
+                        - coordinates: [2,3]
+                          status: "miss"
+                        - coordinates: [4,6]
+                          status: "hit"
+                        - coordinates: [5,7]
+                          status: "sunk"
+                      ships_remaining: 3
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: API key provided as Bearer token
+
+  parameters:
+    GameId:
+      name: gameId
+      in: path
+      required: true
+      description: Unique game identifier
+      schema:
+        type: string
+        pattern: '^game_[a-zA-Z0-9]{8}$'
+        example: "game_7f8a9b2c"
+
+  schemas:
+    # Request Schemas
+    CreateGameRequest:
+      type: object
+      required:
+        - player_name
+      properties:
+        player_name:
+          type: string
+          minLength: 1
+          maxLength: 50
+          pattern: '^[a-zA-Z0-9_-]+$'
+          description: Name identifier for the player
+          example: "AI_Player_1"
+        difficulty:
+          $ref: '#/components/schemas/GameDifficulty'
+        board_size:
+          type: integer
+          minimum: 8
+          maximum: 15
+          default: 10
+          description: Board dimensions (creates N×N grid)
+          example: 10
+        time_limit:
+          type: integer
+          minimum: 30
+          maximum: 600
+          default: 300
+          description: Time limit per move in seconds
+          example: 300
+
+    PlaceShipsRequest:
+      type: object
+      required:
+        - ships
+      properties:
+        ships:
+          type: array
+          minItems: 5
+          maxItems: 5
+          items:
+            $ref: '#/components/schemas/ShipPlacement'
+          description: Array of ship placement objects
+
+    AttackRequest:
+      type: object
+      required:
+        - coordinates
+      properties:
+        coordinates:
+          $ref: '#/components/schemas/Coordinates'
+        timestamp:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp of move
+          example: "2024-01-15T10:35:00Z"
+
+    # Response Schemas
+    GameCreatedResponse:
+      type: object
+      properties:
+        game_id:
+          type: string
+          example: "game_7f8a9b2c"
+        player_name:
+          type: string
+          example: "AI_Player_1"
+        status:
+          $ref: '#/components/schemas/GameStatus'
+        board_size:
+          type: integer
+          example: 10
+        time_limit:
+          type: integer
+          example: 300
+        ships_to_place:
+          type: array
+          items:
+            $ref: '#/components/schemas/ShipRequirement'
+        created_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00Z"
+
+    GameResponse:
+      type: object
+      properties:
+        game_id:
+          type: string
+          example: "game_7f8a9b2c"
+        player_name:
+          type: string
+          example: "AI_Player_1"
+        status:
+          $ref: '#/components/schemas/GameStatus'
+        board_size:
+          type: integer
+          example: 10
+        current_turn:
+          type: string
+          enum: [player, opponent]
+          example: "player"
+        moves_made:
+          type: integer
+          minimum: 0
+          example: 15
+        ships_remaining:
+          type: object
+          properties:
+            player:
+              type: integer
+              minimum: 0
+              example: 3
+            opponent:
+              type: integer
+              minimum: 0
+              example: 2
+        time_remaining:
+          type: integer
+          minimum: 0
+          example: 245
+        last_move:
+          $ref: '#/components/schemas/LastMove'
+
+    GameListResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+          minimum: 0
+          example: 42
+        games:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameSummary'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    GameDeleteResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: "Game terminated successfully"
+        game_id:
+          type: string
+          example: "game_7f8a9b2c"
+        final_status:
+          type: string
+          example: "terminated_by_player"
+
+    PlaceShipsResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "ships_placed_successfully"
+        game_id:
+          type: string
+          example: "game_7f8a9b2c"
+        ships_placed:
+          type: integer
+          example: 5
+        game_status:
+          $ref: '#/components/schemas/GameStatus'
+        message:
+          type: string
+          example: "All ships placed. Game ready to begin."
+
+    AttackResponse:
+      type: object
+      properties:
+        attack_result:
+          $ref: '#/components/schemas/AttackResult'
+        coordinates:
+          $ref: '#/components/schemas/Coordinates'
+        ship_hit:
+          $ref: '#/components/schemas/ShipType'
+        ship_sunk:
+          type: boolean
+          example: false
+        game_status:
+          $ref: '#/components/schemas/GameStatus'
+        your_turn:
+          type: boolean
+          example: false
+        opponent_ships_remaining:
+          type: integer
+          minimum: 0
+          example: 4
+        next_move_deadline:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:40:00Z"
+
+    AttackHistoryResponse:
+      type: object
+      properties:
+        total_attacks:
+          type: integer
+          minimum: 0
+          example: 23
+        attacks:
+          type: array
+          items:
+            $ref: '#/components/schemas/AttackHistoryItem'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    BoardStateResponse:
+      type: object
+      properties:
+        game_id:
+          type: string
+          example: "game_7f8a9b2c"
+        your_board:
+          $ref: '#/components/schemas/PlayerBoard'
+        opponent_board:
+          $ref: '#/components/schemas/OpponentBoard'
+
+    # Common Schemas
+    GameStatus:
+      type: string
+      enum:
+        - awaiting_ship_placement
+        - ready_to_start
+        - in_progress
+        - completed
+        - terminated_by_player
+        - terminated_by_timeout
+      example: "in_progress"
+
+    GameDifficulty:
+      type: string
+      enum: [easy, medium, hard]
+      default: medium
+      description: Game difficulty level
+      example: "medium"
+
+    ShipType:
+      type: string
+      enum: [carrier, battleship, cruiser, submarine, destroyer]
+      example: "battleship"
+
+    AttackResult:
+      type: string
+      enum: [hit, miss, sunk, invalid]
+      example: "hit"
+
+    Coordinates:
+      type: array
+      items:
+        type: integer
+        minimum: 0
+        maximum: 14
+      minItems: 2
+      maxItems: 2
+      description: [x, y] coordinates where [0,0] is bottom-left
+      example: [4, 6]
+
+    ShipPlacement:
+      type: object
+      required:
+        - type
+        - coordinates
+      properties:
+        type:
+          $ref: '#/components/schemas/ShipType'
+        coordinates:
+          type: array
+          items:
+            $ref: '#/components/schemas/Coordinates'
+          description: Array of [x, y] coordinate pairs forming the ship
+          example: [[1,1], [1,2], [1,3], [1,4], [1,5]]
+
+    ShipRequirement:
+      type: object
+      properties:
+        type:
+          $ref: '#/components/schemas/ShipType'
+        size:
+          type: integer
+          minimum: 2
+          maximum: 5
+          example: 5
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 1
+          example: 1
+
+    Ship:
+      type: object
+      properties:
+        type:
+          $ref: '#/components/schemas/ShipType'
+        coordinates:
+          type: array
+          items:
+            $ref: '#/components/schemas/Coordinates'
+        hits:
+          type: array
+          items:
+            $ref: '#/components/schemas/Coordinates'
+        status:
+          type: string
+          enum: [intact, damaged, sunk]
+          example: "damaged"
+
+    LastMove:
+      type: object
+      properties:
+        player:
+          type: string
+          enum: [self, opponent]
+          example: "opponent"
+        coordinates:
+          $ref: '#/components/schemas/Coordinates'
+        result:
+          $ref: '#/components/schemas/AttackResult'
+        timestamp:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:35:22Z"
+
+    GameSummary:
+      type: object
+      properties:
+        game_id:
+          type: string
+          example: "game_7f8a9b2c"
+        player_name:
+          type: string
+          example: "AI_Player_1"
+        status:
+          $ref: '#/components/schemas/GameStatus'
+        created_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:35:22Z"
+
+    AttackHistoryItem:
+      type: object
+      properties:
+        move_number:
+          type: integer
+          minimum: 1
+          example: 1
+        player:
+          type: string
+          enum: [self, opponent]
+          example: "self"
+        coordinates:
+          $ref: '#/components/schemas/Coordinates'
+        result:
+          $ref: '#/components/schemas/AttackResult'
+        ship_hit:
+          $ref: '#/components/schemas/ShipType'
+        ship_sunk:
+          type: boolean
+        timestamp:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:31:15Z"
+
+    PlayerBoard:
+      type: object
+      properties:
+        size:
+          type: integer
+          example: 10
+        ships:
+          type: array
+          items:
+            $ref: '#/components/schemas/Ship'
+        attacks_received:
+          type: array
+          items:
+            type: object
+            properties:
+              coordinates:
+                $ref: '#/components/schemas/Coordinates'
+              result:
+                $ref: '#/components/schemas/AttackResult'
+
+    OpponentBoard:
+      type: object
+      properties:
+        size:
+          type: integer
+          example: 10
+        known_cells:
+          type: array
+          items:
+            type: object
+            properties:
+              coordinates:
+                $ref: '#/components/schemas/Coordinates'
+              status:
+                type: string
+                enum: [unknown, miss, hit, sunk]
+                example: "hit"
+        ships_remaining:
+          type: integer
+          minimum: 0
+          example: 3
+
+    Pagination:
+      type: object
+      properties:
+        limit:
+          type: integer
+          example: 20
+        offset:
+          type: integer
+          example: 0
+        total:
+          type: integer
+          example: 42
+
+    # Error Schemas
+    Error:
+      type: object
+      required:
+        - error
+        - timestamp
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - message
+          properties:
+            code:
+              type: string
+              example: "INVALID_SHIP_PLACEMENT"
+            message:
+              type: string
+              example: "Ships cannot overlap or be adjacent"
+            details:
+              type: object
+              example:
+                conflicting_coordinates: [[2,3], [2,4]]
+                ship_types: ["destroyer", "cruiser"]
+        timestamp:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00Z"
+        request_id:
+          type: string
+          example: "req_abc123"
+
+  responses:
+    BadRequest:
+      description: Bad Request - Invalid input parameters
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalid_coordinates:
+              summary: Invalid coordinates
+              value:
+                error:
+                  code: "INVALID_COORDINATES"
+                  message: "Coordinates must be within board boundaries"
+                  details:
+                    provided_coordinates: [15, 3]
+                    board_size: 10
+                timestamp: "2024-01-15T10:30:00Z"
+                request_id: "req_abc123"
+
+    Unauthorized:
+      description: Unauthorized - Missing or invalid API key
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            missing_api_key:
+              summary: Missing API key
+              value:
+                error:
+                  code: "INVALID_API_KEY"
+                  message: "API key is required"
+                timestamp: "2024-01-15T10:30:00Z"
+                request_id: "req_abc123"
+
+    NotFound:
+      description: Not Found - Resource does not exist
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            game_not_found:
+              summary: Game not found
+              value:
+                error:
+                  code: "GAME_NOT_FOUND"
+                  message: "Game with ID 'game_invalid' does not exist"
+                timestamp: "2024-01-15T10:30:00Z"
+                request_id: "req_abc123"
+
+    Conflict:
+      description: Conflict - Request conflicts with current state
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            not_player_turn:
+              summary: Not player's turn
+              value:
+                error:
+                  code: "NOT_PLAYER_TURN"
+                  message: "Cannot make move when it's not your turn"
+                  details:
+                    current_turn: "opponent"
+                timestamp: "2024-01-15T10:30:00Z"
+                request_id: "req_abc123"
+
+    RateLimitExceeded:
+      description: Too Many Requests - Rate limit exceeded
+      headers:
+        X-RateLimit-Limit:
+          schema:
+            type: integer
+          description: The number of allowed requests in the current period
+        X-RateLimit-Remaining:
+          schema:
+            type: integer
+          description: The number of requests remaining in the current period
+        X-RateLimit-Reset:
+          schema:
+            type: integer
+          description: The time when the current period resets (Unix timestamp)
+        Retry-After:
+          schema:
+            type: integer
+          description: The number of seconds to wait before retrying
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            rate_limit:
+              summary: Rate limit exceeded
+              value:
+                error:
+                  code: "RATE_LIMIT_EXCEEDED"
+                  message: "Rate limit exceeded. Try again in 60 seconds."
+                retry_after: 60
+                timestamp: "2024-01-15T10:30:00Z"
+                request_id: "req_abc123"
+
+tags:
+  - name: Game Management
+    description: Operations for creating, listing, and managing games
+  - name: Ship Placement
+    description: Operations for placing ships on the game board
+  - name: Gameplay
+    description: Operations for making attacks and retrieving game history
+  - name: Game State
+    description: Operations for retrieving current game and board state
