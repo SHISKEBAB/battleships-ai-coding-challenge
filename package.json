@@ -12,6 +12,8 @@
     "test:coverage": "jest --coverage",
     "lint": "echo \"Linting not configured yet\"",
     "typecheck": "tsc --noEmit"
+    "docs:serve": "npx redoc-cli serve docs/openapi.yaml",
+    "docs:build": "npx redoc-cli bundle docs/openapi.yaml -o docs/index.html"
   },
   "repository": {
     "type": "git",
